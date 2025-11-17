@@ -160,8 +160,6 @@ The original vacant and abandoned building dataset was filtered to only include 
 
 
 ```{r visualize- 311 points}
-#| fig-width: 10
-#| fig-height: 5
 #| message: false
 #| warning: false
 #| echo: false
@@ -296,7 +294,8 @@ ggplot() +
     subtitle = "500m x 500m cells, Chicago 2017"
   ) +
   theme_crime()+
-  theme_void()
+  theme_void()+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
 
 ```
 
@@ -416,7 +415,8 @@ ggplot() +
     subtitle = "High-High = Hot spots of disorder"
   ) +
   theme_crime()+
-  theme_void()
+  theme_void()+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
 
 ```
 
@@ -721,8 +721,6 @@ fishnet <- fishnet %>%
 ```
 
 ```{r compare-models}
-#| fig-width: 16
-#| fig-height: 6
 #| message: false
 #| warning: false
 #| echo: false

@@ -3,7 +3,7 @@
     "path": "~/GitHub/portfolio-setup-aruth3/assignments/assignment_4/Rutherford_Angel_Assignment4.qmd",
     "project_path": "assignments/assignment_4/Rutherford_Angel_Assignment4.qmd",
     "type": "quarto_markdown",
-    "hash": "3158442384",
+    "hash": "3338904679",
     "contents": "",
     "dirty": false,
     "created": 1763347408156.0,
@@ -12,15 +12,16 @@
     "properties": {
         "source_window_id": "",
         "Source": "Source",
-        "cursorPosition": "99,0",
-        "scrollLine": "81"
+        "cursorPosition": "722,21",
+        "scrollLine": "716",
+        "last_setup_crc32": "8a96942ac8c106a2"
     },
     "folds": "",
-    "lastKnownWriteTime": 1763347504,
+    "lastKnownWriteTime": 1763348781,
     "encoding": "UTF-8",
     "collab_server": "",
     "source_window": "",
-    "last_content_update": 1763347504491,
+    "last_content_update": 1763348781740,
     "read_only": false,
     "read_only_alternatives": []
 }
