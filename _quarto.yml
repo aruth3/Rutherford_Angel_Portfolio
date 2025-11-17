@@ -21,7 +21,9 @@ website:
           - href: assignments/assignment_3(midterm)/Rutherford_Angel_Appendix.qmd
             text: "Midterm: Philadelphia Housing Model - Technical Appendix"
           - href: assignments/assignment_3(midterm)/Rutherford_Angel_Presentation.qmd
-            text: "Midterm: Philadelphia Housing Price Prediction - Presentation"
+            text: "Midterm: Philadelphia Housing Price Prediction - Technical Appendix"
+            
+
 format:
   html:
     theme: cosmo
