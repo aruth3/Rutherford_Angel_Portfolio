@@ -1,0 +1,893 @@
+---
+title: "Assignment 4: Spatial Predictive Analysis"
+subtitle: "Evaluating Predictive Policing Models"
+author: "Angel Rutherford"
+date: "2025-11-18"
+format: 
+  html:
+    code-fold: show
+    toc: true
+    toc-location: left
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+
+```{r setup}
+#| message: false
+#| warning: false
+#| include: false
+
+# Load required packages
+library(tidyverse)      # Data manipulation
+library(sf)             # Spatial operations
+library(here)           # Relative file paths
+library(viridis)        # Color scales
+library(terra)          # Raster operations (replaces 'raster')
+library(spdep)          # Spatial dependence
+library(FNN)            # Fast nearest neighbors
+library(MASS)           # Negative binomial regression
+library(patchwork)      # Plot composition (replaces grid/gridExtra)
+library(knitr)          # Tables
+library(kableExtra)     # Table formatting
+library(classInt)       # Classification intervals
+library(here)
+
+# Spatstat split into sub-packages
+library(spatstat.geom)    # Spatial geometries
+library(spatstat.explore) # Spatial exploration/KDE
+
+# Set options
+options(scipen = 999)  # No scientific notation
+set.seed(5080)         # Reproducibility
+
+# Create consistent theme for visualizations
+theme_crime <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold", size = base_size + 1),
+      plot.subtitle = element_text(color = "gray30", size = base_size - 1),
+      legend.position = "right",
+      panel.grid.minor = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank()
+    )
+}
+
+# Set as default
+theme_set(theme_crime())
+
+```
+
+
+### Introduction
+
+Predictive policing is a controversial yet widely used practice that aims to prevent crime by anticipating where it is likely to occur. Police departments and vendors promote predictive policing algorithms as they ideally allow for efficient deployment of policing units, objective and data-driven analysis of crime, and an overall proactive strategy for addressing crime. Over time, predictive policing has evolved through several technical generations. One approach to predictive policing is risk terrain modeling which aims to identify the relationship between environmental features and crime. Conceptually, risk terrain modeling is aligned with the Broken Windows Theory which suggests that visible signs of neighborhood disorder lead to crime.
+
+In this analysis, the risk terrain modeling framework is applied to evaluate both its predictive capacity and broader implications. Drawing on the logic of the Broken Windows Theory, the predictive model examines burglary counts in relation to the presence of vacant and abandoned buildings. According to Broken Windows Theory, areas with higher concentrations of vacant and abandoned buildings should be considered at greater risk for heightened crime.
+
+<br>
+
+
+### Part 1: Data Loading & Exploration
+
+
+```{r load-boundaries, bulgaries, and police districts}
+#| message: false
+#| warning: false
+#| include: false
+
+# Load police districts (used for spatial cross-validation)
+
+burglaries <- st_read("./data/burglaries.shp")%>% 
+  st_transform('ESRI:102271')
+
+policeDistricts <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/24zt-jpfn?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = dist_num)
+
+
+# Load Chicago boundary
+chicagoBoundary <- 
+  st_read("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/Chapter5/chicagoBoundary.geojson") %>%
+  st_transform('ESRI:102271')
+
+```
+
+
+```{r load 311 data + create dimension summary}
+#| message: false
+#| warning: false
+#| include: false
+
+#raw data
+vac_bldings_raw <- st_read("./data/Vacant_and_Abandoned_Buildings.geojson") %>%
+  st_transform('ESRI:102271')
+
+dim_raw <- data.frame(
+  Dataset = "Raw Vacancy Data",
+  Rows = nrow(vac_bldings_raw)
+)
+
+#filtered to 2017 data
+vac_bldings_2017 <- vac_bldings_raw %>%
+  filter(str_starts(issued_date, "2017"))
+
+dim_2017 <- data.frame(
+  Dataset = "2017 Vacancy Data",
+  Rows = nrow(vac_bldings_2017)
+)
+
+#missing geometry data removed 
+vac_bldings_clean <- vac_bldings_2017 %>%
+  filter(!is.na(st_geometry(.)) & !st_is_empty(.))
+
+dim_clean <- data.frame(
+  Dataset = "Cleaned Vacancy Data",
+  Rows = nrow(vac_bldings_clean)
+)
+
+
+vac_bldings<- st_read("./data/Vacant_and_Abandoned_Buildings.geojson") %>%
+  st_transform('ESRI:102271')%>%
+  filter(str_starts(issued_date, "2017")) %>%
+  filter(!is.na(st_geometry(.)) & !st_is_empty(.))
+
+```
+
+
+```{r raw, clean, and filtered data dimension table}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+dim_summary1 <- bind_rows(dim_raw, dim_2017, dim_clean)
+
+kable(dim_summary1, caption = "Table 1. Vacancy Dataset Dimensions Before and After Filtering and Cleaning")%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+<br>
+
+The original vacant and abandoned building dataset was filtered to only include data from 2017 and further cleaned to remove any entries with no geometry data, ensuring accuracy in our spatial analysis. The resulting dataset used for the remainder of this analysis reported 399 vacant and abandoned buildings in Chicago for 2017.
+
+
+<br>
+
+
+```{r visualize- 311 points}
+#| fig-width: 10
+#| fig-height: 5
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Simple point map
+p1 <- ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "gray95", color = "gray60") +
+  geom_sf(data = vac_bldings, color = "#d62828", size = 0.1, alpha = 0.4) +
+  labs(
+    title = "Locations of Vacant and\n Abandoned Buildings",
+    subtitle = paste0("Chicago 2017, n = ", nrow(vac_bldings))
+  )+
+  theme_void()
+
+# Density surface using modern syntax
+p2 <- ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "gray95", color = "gray60") +
+  geom_density_2d_filled(
+    data = data.frame(st_coordinates(vac_bldings)),
+    aes(X, Y),
+    alpha = 0.7,
+    bins = 5
+  ) +
+  scale_fill_viridis_d(
+    option = "plasma",
+    direction = -1,
+    guide = "none"  # Modern ggplot2 syntax (not guide = FALSE)
+  ) +
+  labs(
+    title = "Density Surface",
+    subtitle = "Kernel density estimation"
+  ) +
+  theme_void()
+
+# Combine plots using patchwork (modern approach)
+p1 + p2 + 
+  plot_annotation(
+    title = "Figure 1. Spatial Distribution of Vacant and\n Abandoned Buildings in Chicago",
+    tag_levels = 'A'
+  )
+
+```
+
+<br>
+
+Figure 1 shows the initial exploratory visualization of vacant and abandoned buildings in Chicago : a point map showing the precise locations of individual buildings (left), and a kernel density estimation (KDE) map that highlights areas of concentrated vacancy across the city (right). Both maps illustrate the uneven distribution of vacant buildings across Chicago. The KDE map specifically reveals a dense concentration of vacant buildings in Southwest Chicago, as well as a smaller cluster of buildings in West Chicago.  
+
+
+### Part 2: Fishnet Grid Creation
+
+```{r create-fishnet}
+#| message: false
+#| warning: false
+#| include: false
+
+# Create 500m x 500m grid
+fishnet <- st_make_grid(
+  chicagoBoundary,
+  cellsize = 500,  # 500 meters per cell
+  square = TRUE
+) %>%
+  st_sf() %>%
+  mutate(uniqueID = row_number())
+
+# Keep only cells that intersect Chicago
+fishnet <- fishnet[chicagoBoundary, ]
+
+```
+
+
+```{r aggregate-burglaries to fishnet}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Spatial join: which cell contains each burglary?
+burglaries_fishnet <- st_join(burglaries, fishnet, join = st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID) %>%
+  summarize(countBurglaries = n())
+
+# Join back to fishnet (cells with 0 burglaries will be NA)
+fishnet <- fishnet %>%
+  left_join(burglaries_fishnet, by = "uniqueID") %>%
+  mutate(countBurglaries = replace_na(countBurglaries, 0))
+
+```
+
+
+```{r aggregate-vacant buildings}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Spatial join: which cell contains each burglary?
+vac_fishnet <- st_join(vac_bldings, fishnet, join = st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID) %>%
+  summarize(countBuildings = n())
+
+# Join back to fishnet (cells with 0 burglaries will be NA)
+fishnet <- fishnet %>%
+  left_join(vac_fishnet, by = "uniqueID") %>%
+  mutate(countBuildings = replace_na(countBuildings, 0))
+
+```
+
+
+```{r visualize-fishnet-vacant buildings}
+#| fig-width: 8
+#| fig-height: 6
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Visualize aggregated counts
+ggplot() +
+  geom_sf(data = fishnet, aes(fill = countBuildings), color = NA) +
+  geom_sf(data = chicagoBoundary, fill = NA, color = "white", linewidth = 1) +
+  scale_fill_viridis_c(
+    name = "Vacant and Abandoned Buildings",
+    option = "plasma",
+    trans = "sqrt",  # Square root for better visualization of skewed data
+    breaks = c(0, 1, 5, 10, 20, 40)
+  ) +
+  labs(
+    title = "Figure 2. Vacant and Abandoned Buildings Counts by Grid Cell",
+    subtitle = "500m x 500m cells, Chicago 2017"
+  ) +
+  theme_crime()+
+  theme_void()
+
+```
+
+
+<br>
+
+Figure 2 depicts the distribution of vacant and abandoned houses through a fishnet grid. 
+Fishnet grids are a staple in predictive policing because they provide evenly sized consistent spatial units that simplify analysis and reduce bias from pre-existing irregular boundaries. In this analysis, a 500 m x 500 m fishnet grid specifically is used to provide a balance between nuanced local patterns and computational ease. Compared to the kernel density map of vacant and abandoned buildings, the fishnet grid is more precise as it summarizes local cell counts, highlighting outliers in North, Northwest, and Far South Chicago and more defined clusters in West and Southwest Chicago. 
+
+<br>
+
+
+### Part 3: Spatial Features
+
+In this analysis, two spatial features are introduced to enhance the model’s predictive power: the distance to the three nearest vacant and abandoned building and the distance to the nearest hotspot or cluster of cells with high numbers of such buildings. By combining these spatial measures with the raw counts of vacant and abandoned buildings, the model is able to capture multi-scale generalized spatial patterns as well as potential spillover effects, where the influence of vacancy extends into nearby areas.
+
+The first spatial feature created in this analysis is each cell's average distance to the three nearest vacant or abandoned buildings. This predictive model operates on the assumption that proximity to vacant or abandoned buildings is correlated with levels of crimes. Though outliers can be important, k-nearest neighbor feature as well as the distance to hotspot feature smooth the data to reveal broader spatial trends rather than a relationship to a single property. Each cell already considers the local proximity to these buildings while the k-nearest neighbor spatial feature (where k=3) introduces another spatial scale of proximity: neighborhood-level proximity. 
+
+
+```{r nn-feature-vacant buildings}
+#| message: false
+#| warning: false
+#| include: false
+
+# Get coordinates
+fishnet_coords <- st_coordinates(st_centroid(fishnet))%>%
+  na.omit()
+
+vac_coords <- st_coordinates(vac_bldings)%>%
+  na.omit()
+
+# Calculate k nearest neighbors and distances
+nn_result <- get.knnx(vac_coords, fishnet_coords, k = 3)
+
+# Add to fishnet
+fishnet <- fishnet %>%
+  mutate(
+   vac_buildings.nn = rowMeans(nn_result$nn.dist)
+  )
+
+```
+
+
+The second spatial feature created for this analysis was each cell's distance to clusters of cells with high amounts of vacant and abandoned buildings near other cells with similar high amounts, known as "High-High" clusters. These clusters theoretically symbolize hotspots or areas with significant levels of disorder. Calculating distance from these hotspots allows the model to account for regional-level spatial analysis like the one shown in the kernel density estimation map. Before calculating the distance to these hotspots, first the hotspots were identified by using a statistical measure of spatial autocorrelation, Local Moran's I. This approach moves beyond simple counts or visual diagnostics by formally testing where clustering is statistically significant.
+
+<br>
+
+```{r local-morans-vacant and abandoned buildings}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Function to calculate Local Moran's I
+calculate_local_morans <- function(data, variable, k = 5) {
+  
+  # Create spatial weights
+  coords <- st_coordinates(st_centroid(data))
+  neighbors <- knn2nb(knearneigh(coords, k = k))
+  weights <- nb2listw(neighbors, style = "W", zero.policy = TRUE)
+  
+  # Calculate Local Moran's I
+  local_moran <- localmoran(data[[variable]], weights)
+  
+  # Classify clusters
+  mean_val <- mean(data[[variable]], na.rm = TRUE)
+  
+  data %>%
+    mutate(
+      local_i = local_moran[, 1],
+      p_value = local_moran[, 5],
+      is_significant = p_value < 0.05,
+      
+      moran_class = case_when(
+        !is_significant ~ "Not Significant",
+        local_i > 0 & .data[[variable]] > mean_val ~ "High-High",
+        local_i > 0 & .data[[variable]] <= mean_val ~ "Low-Low",
+        local_i < 0 & .data[[variable]] > mean_val ~ "High-Low",
+        local_i < 0 & .data[[variable]] <= mean_val ~ "Low-High",
+        TRUE ~ "Not Significant"
+      )
+    )
+}
+
+
+fishnet <- calculate_local_morans(fishnet, "countBuildings", k = 5)
+
+```
+
+
+```{r visualize-morans-vacant builduings}
+#| fig-width: 8
+#| fig-height: 6
+#| message: false
+#| warning: false
+#| echo: false
+
+# Visualize hot spots
+ggplot() +
+  geom_sf(
+    data = fishnet, 
+    aes(fill = moran_class), 
+    color = NA
+  ) +
+  scale_fill_manual(
+    values = c(
+      "High-High" = "#d7191c",
+      "High-Low" = "#fdae61",
+      "Low-High" = "#abd9e9",
+      "Low-Low" = "#2c7bb6",
+      "Not Significant" = "gray90"
+    ),
+    name = "Cluster Type"
+  ) +
+  labs(
+    title = "Figure 3. Local Moran's I: Vacant and Abandoned Building Clusters",
+    subtitle = "High-High = Hot spots of disorder"
+  ) +
+  theme_crime()+
+  theme_void()
+
+```
+
+<br>
+
+The map in Figure 3 presents the results of a Local Moran’s I spatial autocorrelation analysis. Local Moran's I in the context of predictive policing measures how similar or dissimilar a cells value is to a set number of neighbors. In this case, the 5 nearest cells or neighbors were used to determine the level of spatial autocorrelation. While most on Chicago's grid cells were found to be not significantly spatially correlated, there seems to be a radial effect of "High-High" clusters (red) immediately surrounded by low-value cells near high-value cells (blue) in Southeast and Southwest Chicago. The same pattern appears on a smaller scale in West Chicago as well. Each cell's average distance was then calculated from the clusters identified as "High-High". 
+
+<br>
+
+
+```{r distance-to-hotspots}
+#| message: false
+#| warning: false
+#| include: false
+
+# Get centroids of "High-High" cells (hot spots)
+hotspots <- fishnet %>%
+  filter(moran_class == "High-High") %>%
+  st_centroid()
+
+# Calculate distance from each cell to nearest hot spot
+if (nrow(hotspots) > 0) {
+  fishnet <- fishnet %>%
+    mutate(
+      dist_to_hotspot = as.numeric(
+        st_distance(st_centroid(fishnet), hotspots %>% st_union())
+      )
+    )
+  
+}
+
+```
+
+
+### Part 4: Count Regression Models
+
+
+As previously mentioned, the dependent variable that the model is intended to predict is the raw counts of burglaries across Chicago. The most commonly used regression model, Ordinary Least Squares (OLS), is not appropriate in this context as OLS regression assumes continuous outcomes, constant variance in errors and the normal distribution of errors, all of which are often violated in discrete count data. In addition, OLS can generate negative predicted values, which are not theoretically meaningful for discrete, non‑negative outcomes such as crime counts.
+
+In order to address these limitations, count regression models, starting with Poisson regression, were used for this analysis. Poisson regression assumes the mean and variance of observations are equal. When this assumption is violated and the variance exceeds the mean, the model exhibits overdispersion. Overdispersion can be accounted for by fitting a Negative Binomial regression model which mirrors the Poisson but differs by allowing for the mean and variance to differ. Overdispersion can be statistically measured by dividing a model's sum of squared residuals by the model's degrees of freedom. The threshold for problematic dispersion is when it is calculated to be greater than 1.5, indicating that a Negative Binomial model may be more appropriate. After fitting the Poisson regression model to the data and testing for overdispersion, the dispersion parameter returned a 3.6, indicating substantial overdispersion. Thus, a Negative Binomial model was also fitted. The models were then compared based on their resulting Akaike Information Criterion (AIC) which is a statistic that allows models to be compared based on their balance of complexity and predictive power. A lower AIC indicates the better model. Table 2 shows that the Negative Binomial is a more appropriate model for this anaylsis as it yields a lower AIC in addition to account for overdispersion. 
+
+<br>
+
+```{r join-districts}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Join district information to fishnet
+fishnet <- st_join(
+  fishnet,
+  policeDistricts,
+  join = st_within,
+  left = TRUE
+) %>%
+  filter(!is.na(District))
+
+```
+
+```{r prepare-data}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Create clean modeling dataset
+fishnet_model <- fishnet %>%
+  st_drop_geometry() %>%
+  dplyr::select(
+    uniqueID,
+    District,
+    countBurglaries,
+    countBuildings,
+    vac_buildings.nn,
+    dist_to_hotspot
+  ) %>%
+  na.omit()  # Remove any remaining NAs
+
+```
+
+
+```{r fit-poisson}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Fit Poisson regression
+model_poisson <- glm(
+  countBurglaries ~ countBuildings + vac_buildings.nn + 
+    dist_to_hotspot,
+  data = fishnet_model,
+  family = "poisson"
+)
+
+# Summary
+summary(model_poisson)
+```
+
+```{r check-overdispersion}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Calculate dispersion parameter
+dispersion <- sum(residuals(model_poisson, type = "pearson")^2) / 
+              model_poisson$df.residual
+dispersion
+```
+
+```{r fit-negbin}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Fit Negative Binomial model
+model_nb <- glm.nb(
+  countBurglaries ~ countBuildings + vac_buildings.nn + 
+    dist_to_hotspot,
+  data = fishnet_model
+)
+
+# Summary
+summary(model_nb)
+
+
+```
+
+
+```{r AIC comaprison table}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+aic_poisson <- AIC(model_poisson)
+aic_nb <- AIC(model_nb)
+
+aic_results <- data.frame(
+  Model = c("Poisson", "Negative Binomial"),
+  AIC = c(aic_poisson, aic_nb)
+)
+
+# Display with kable
+kable(aic_results, digits = 2, caption = "Table 2. AIC Comparison Between Poisson and Negative Binomial Models")%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+### Part 5: Spatial Cross-Validation 
+
+To evaluate model's ability generalize to unseen data, Leave-One-Group-Out Cross-Validation (LOGO-CV) was implemented, holding out entire police districts during each fold. Although the same dataset is used throughout cross-validation, the observations are split into training and test sets: the training set of districts is used to fit the model, while the excluded district serves as the test set to assess predictive performance. This specific approach of leaving one group out minimizes the impact of spatial autocorrelation and avoids spatial leakage when splitting the data into train and test groups by using entire groups of neighboring observations rather than individual cells. Furthermore, rather than using the arbitrary grid cells, using police districts as the spatial unit of measurement considers real-world deployment of police resources as it assess whether the model captures district-level crime trends. The model's performance was assessed by calculating the prediction error metrics, Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE), per district. Table 3 reports the error metrics obtained when each district was used as the test set.
+
+<br>
+
+```{r spatial-cv}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Get unique districts
+districts <- unique(fishnet_model$District)
+cv_results <- tibble()
+
+for (i in seq_along(districts)) {
+  
+  test_district <- districts[i]
+  
+  # Split data
+  train_data <- fishnet_model %>% filter(District != test_district)
+  test_data <- fishnet_model %>% filter(District == test_district)
+  
+  # Fit model on training data
+  model_cv <- glm.nb(
+     countBurglaries ~ countBuildings + vac_buildings.nn + 
+    dist_to_hotspot,
+    data = train_data
+  )
+  
+  # Predict on test data
+  test_data <- test_data %>%
+    mutate(
+      prediction = predict(model_cv, test_data, type = "response")
+    )
+  
+  # Calculate metrics
+  mae <- mean(abs(test_data$countBurglaries - test_data$prediction))
+  rmse <- sqrt(mean((test_data$countBurglaries - test_data$prediction)^2))
+  
+  # Store results
+  cv_results <- bind_rows(
+    cv_results,
+    tibble(
+      Fold = i,
+      Test_District = test_district,
+      N_Test = nrow(test_data),
+      MAE = mae,
+      RMSE = rmse
+    )
+  )
+  
+}
+
+cv_results
+```
+
+```{r cv-results-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Show results
+cv_results %>%
+  arrange(desc(MAE)) %>%
+  kable(
+    digits = 2,
+    caption = "Table 3. LOGO CV Results by District"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+<br>
+
+Table 3 shows that the district the model struggles to predict the most is District 3, as it returns the highest MAE of 6.29 and a RMSE of 7.95. The table also shows the districts the model generalizes well to Districts 16, 17, and 20 as they exhibited the lowest prediction errors, with MAE values between 1.29 and 1.87 and RMSE values between 1.61 and 2.29. Most of the police districts fell into a moderate performance range, with MAE values between 2.32 and 3.70 and RMSE values between 2.72 and 4.98. Overall, the cross-validation results indicate that the model's predictive accuracy varies substantially across police districts. 
+
+<br>
+
+
+### Part 6: Model Evaluation
+
+A baseline KDE map of burglaries was created in order to further evaluate the model's performance. Prior to the development of risk terrain modeling, predictive policing relied on hotspot approaches which assumed that crime was most likely to occur in the same locations where it had previously occurred. This hotspot approach relies solely on past crime locations and applies spatial smoothing to identify at-risk areas. The actual locations of burglaries, the spatial model's predictions, and the KDE baseline predictions were all plotted side-by-side in order to determine which approach more accurately captures the spatial concentration of burglaries.
+
+<br>
+
+```{r kde-bulgary-baseline}
+#| message: false
+#| warning: false
+#| include: false
+
+# Convert burglaries to ppp (point pattern) format for spatstat
+burglaries_ppp <- as.ppp(
+  st_coordinates(burglaries),
+  W = as.owin(st_bbox(chicagoBoundary))
+)
+
+# Calculate KDE with 1km bandwidth
+kde_burglaries <- density.ppp(
+  burglaries_ppp,
+  sigma = 1000,  # 1km bandwidth
+  edge = TRUE    # Edge correction
+)
+
+# Convert to terra raster (modern approach, not raster::raster)
+kde_raster <- rast(kde_burglaries)
+
+# Extract KDE values to fishnet cells
+fishnet <- fishnet %>%
+  mutate(
+    kde_value = terra::extract(
+      kde_raster,
+      vect(fishnet),
+      fun = mean,
+      na.rm = TRUE
+    )[, 2]  # Extract just the values column
+  )
+
+```
+
+
+```{r final-predictions}
+#| message: false
+#| warning: false
+#| include: false
+
+
+# Fit final model on all data
+final_model <- glm.nb(
+ countBurglaries ~ countBuildings + vac_buildings.nn + 
+    dist_to_hotspot,
+  data = fishnet_model
+)
+
+# Add predictions back to fishnet
+fishnet <- fishnet %>%
+  mutate(
+    prediction_nb = predict(final_model, fishnet_model, type = "response")[match(uniqueID, fishnet_model$uniqueID)]
+  )
+
+# Also add KDE predictions (normalize to same scale as counts)
+kde_sum <- sum(fishnet$kde_value, na.rm = TRUE)
+count_sum <- sum(fishnet$countBurglaries, na.rm = TRUE)
+fishnet <- fishnet %>%
+  mutate(
+    prediction_kde = (kde_value / kde_sum) * count_sum
+  )
+
+```
+
+```{r compare-models}
+#| fig-width: 16
+#| fig-height: 6
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Create three maps
+p1 <- ggplot() +
+  geom_sf(data = fishnet, aes(fill = countBurglaries), color = NA) +
+  scale_fill_viridis_c(name = "Count", option = "plasma", limits = c(0, 15)) +
+  labs(title = "Actual Burglaries") +
+  theme_crime()+
+  theme_void()
+
+p2 <- ggplot() +
+  geom_sf(data = fishnet, aes(fill = prediction_nb), color = NA) +
+  scale_fill_viridis_c(name = "Predicted", option = "plasma", limits = c(0, 15)) +
+  labs(title = "Model Predictions\n (Neg. Binomial)") +
+  theme_crime()+
+  theme_void()
+
+p3 <- ggplot() +
+  geom_sf(data = fishnet, aes(fill = prediction_kde), color = NA) +
+  scale_fill_viridis_c(name = "Predicted", option = "plasma", limits = c(0, 15)) +
+  labs(title = "KDE Baseline Predictions") +
+  theme_crime()+
+  theme_void()
+
+p1 + p2 + p3 +
+  plot_annotation(
+    title = "Figure 4. Actual vs. Predicted Burglaries",
+    subtitle = "Does our complex model outperform simple KDE?"
+  )
+
+```
+<br>
+
+
+Figure 4 compares the actual count of burglaries to the model's and KDE baseline predictions. The visual assessment of the three maps illustrates that KDE baseline prediction outperforms the complex spatial modeling in identifying concentrations of burglaries across Chicago. Table 4 further supports the conclusion drawn from the map as, because MAE and RMSE are lower for the KDE baseline than for the spatial model, the baseline achieves lower average prediction errors and exhibits fewer large errors.
+
+
+<br>
+
+
+```{r model-comparison-metrics}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Calculate performance metrics
+comparison <- fishnet %>%
+  st_drop_geometry() %>%
+  filter(!is.na(prediction_nb), !is.na(prediction_kde)) %>%
+  summarize(
+    Model_MAE = mean(abs(countBurglaries - prediction_nb)),
+    Model_RMSE = sqrt(mean((countBurglaries - prediction_nb)^2)),
+    KDE_MAE = mean(abs(countBurglaries - prediction_kde)),
+    KDE_RMSE = sqrt(mean((countBurglaries - prediction_kde)^2))
+  )
+
+comparison %>%
+  pivot_longer(everything(), names_to = "metric", values_to = "value") %>%
+  separate(metric, into = c("Approach", "metric"), sep = "_") %>%
+  pivot_wider(names_from = metric, values_from = value) %>%
+  kable(
+    digits = 2,
+    caption = "Table 4. Model Performance Comparison"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+
+<br>
+
+An additional way to assess model performance is by mapping the distribution of its errors, which reveals whether systematic spatial patterns of errors emerge within the model itself.
+
+<br>
+
+```{r prediction-errors}
+#| fig-width: 10
+#| fig-height: 5
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Calculate errors
+fishnet <- fishnet %>%
+  mutate(
+    error_nb = countBurglaries - prediction_nb,
+    error_kde = countBurglaries - prediction_kde,
+    abs_error_nb = abs(error_nb),
+    abs_error_kde = abs(error_kde)
+  )
+
+# Map errors
+p1 <- ggplot() +
+  geom_sf(data = fishnet, aes(fill = error_nb), color = NA) +
+  scale_fill_gradient2(
+    name = "Error",
+    low = "#2166ac", mid = "white", high = "#b2182b",
+    midpoint = 0,
+    limits = c(-10, 10)
+  ) +
+  labs(title = "Model Errors (Actual - Predicted)") +
+  theme_crime()+
+  theme_void()
+
+p2 <- ggplot() +
+  geom_sf(data = fishnet, aes(fill = abs_error_nb), color = NA) +
+  scale_fill_viridis_c(name = "Abs. Error", option = "magma") +
+  labs(title = "Absolute Model Errors") +
+  theme_crime()+
+  theme_void()
+
+p1 + p2 +
+  plot_annotation(
+    title = "Figure 5. Model Errors (Signed and Absolute)",
+    subtitle = "Underprediction, Overprediction, and Overall Magnitude of Errors"
+  )
+```
+<br>
+
+
+Figure 5 offers further look into the spatial distribution of the model's errors. The map on the left of the model's signed errors shows that the model often underestimating the amount of burglaries in high crime areas while over-predicting crimes in low crime areas. The absolute error map (right) shows that the largest prediction errors were concentrated in Districts 3, 4, and 6 in South and Southeast Chicago, followed by additional high errors in Districts 14 and 17 in the North and West. Overall, the model’s predictions were inconsistent in identifying observed burglary patterns.
+
+A look into the model's coefficients can also reflect model perform by telling us which of the model's predictors were statistically significant and their association with risk of burglaries. 
+
+<br>
+
+```{r model-summary-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+
+# Create nice summary table MIGHT NOT NEED THIS
+model_summary <- broom::tidy(final_model, exponentiate = TRUE) %>%
+  mutate(
+    across(where(is.numeric), ~round(., 3))
+  )
+
+model_summary %>%
+  kable(
+    caption = "Table 5. Final Negative Binomial Model Coefficients (Exponentiated)",
+    col.names = c("Variable", "Rate Ratio", "Std. Error", "Z", "P-Value")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  footnote(
+    general = "Rate ratios > 1 indicate positive association with burglary counts."
+  )
+```
+
+<br>
+
+Table 5 shows that the rate ratios for all predictors were close to 1, suggesting that although the spatial features were found to be statistically significant (p-value < 0.05) none of the predictors substantially altered burglary risk. This indicates that the predictors contributed minimally to the model’s ability to explain or predict burglary patterns.
+
+<br>
+
+
+### Conclusion
+
+In the scenario offered by this analysis, reliance on Broken Windows Theory and risk terrain modeling would result in ineffective deployment of police units. Both Broken Windows Theory and predictive policing approaches oversimplify crime by assuming that complex social issues can be predicted through superficial, and often stigmatized, indicators of disorder. By attempting to remain unbiased and objective, these approaches neglect the socio-historical forces that shape communities, crime, and policing, which not only undermines predictive accuracy but also increases the risk of reproducing existing inequities.  
+
+---
+
+
+
