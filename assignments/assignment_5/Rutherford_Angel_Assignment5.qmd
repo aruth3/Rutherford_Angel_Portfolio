@@ -1,13 +1,13 @@
 ---
 title: "Assignment 5: Space-Time Prediction of Bike Share Demand: Philadelphia Indego"
 author: "Angel Rutherford"
-date: "`r Sys.Date()`"
-output: 
-    html:
-    code-fold: show
+date: today
+format:
+  html:
+    theme: cosmo
     toc: true
     toc-location: left
-    theme: cosmo
+    code-fold: true
 execute:
   warning: false
   message: false
