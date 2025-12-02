@@ -24,6 +24,7 @@ website:
             text: "Midterm: Philadelphia Housing Price Prediction - Presentation"
           - href: assignments/assignment_4/Rutherford_Angel_Assignment4.qmd
             text: "Assignment 4: Spatial Predictive Analysis"
+          - href: assignments/assignment_5/Rutherford_Angel_Assignment5.qmd
             
 
 format:

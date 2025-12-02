@@ -51,6 +51,8 @@ If there is a special character like comma, you need use double quote mark so th
 # Setup
 
 ```{r setup}
+
+
 # Load required packages (hint: you need tidycensus, tidyverse, and knitr)
 library(tidycensus)
 library(tidyverse)
