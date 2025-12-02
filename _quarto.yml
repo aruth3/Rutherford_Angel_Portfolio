@@ -25,6 +25,7 @@ website:
           - href: assignments/assignment_4/Rutherford_Angel_Assignment4.qmd
             text: "Assignment 4: Spatial Predictive Analysis"
           - href: assignments/assignment_5/Rutherford_Angel_Assignment5.qmd
+            text: "Assignment 5: Space-Time Prediction of Bike Share Demand: Philadelphia Indego"
             
 
 format:
