@@ -1,7 +1,0 @@
-"0","# Create a nicely formatted table of your results using kable()"
-"0","summary_by_county%>%"
-"0"," kable("
-"0","      col.names = c(""County Name"", ""Total Tracts Per County"", ""Average of White Residents(%)"", ""Average of Black Residents(%)"", ""Average of Hispanic Residents (%)""),"
-"0","      caption = ""Average Demographics Per County"","
-"0","     digits=c(0,0,1,1,1)"
-"0",")"

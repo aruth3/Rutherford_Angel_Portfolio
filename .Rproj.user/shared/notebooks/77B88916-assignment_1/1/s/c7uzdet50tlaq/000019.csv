@@ -1,7 +1,0 @@
-"0","# Create a professional table showing the patterns"
-"0","summary_by_moe%>%"
-"0"," kable("
-"0","      col.names = c(""Quality Issues (MOE > %15)"", ""Total Tracts Detected"", ""Average Total Population"", ""Average of White Residents(%)"", ""Average of Black Residents(%)"", ""Average of Hispanic Residents (%)""),"
-"0","      caption = ""Average Demographics Per County"","
-"0","     digits=c(0,0,0,1,1,1)"
-"0",")"

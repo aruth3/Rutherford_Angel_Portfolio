@@ -3,35 +3,29 @@ project:
   output-dir: docs
 
 website:
-  title: "Angel Rutherford - MUSA 5080 Portfolio"
+  title: ""
   navbar:
-      left:
+      search: false
+      background: "#f8f9fa"
+      left: 
       - href: index.qmd
         text: Home
-      - text: Weekly Notes 
-        menu:
-          - href: weekly-notes/week-01-notes.qmd
-            text: Week 1
-      - text: Assignments
-        menu:
-          - href: assignments/assignment_1/assignment_1.qmd
-            text: "Assignment 1: Census Data Quality for Policy Decisions"
-          - href: assignments/assignment_2/Rutherford_Angel_Assignment2.qmd
-            text: "Assignment 2: Spatial Analysis and Visualization"
-          - href: assignments/assignment_3(midterm)/Rutherford_Angel_Appendix.qmd
-            text: "Midterm: Philadelphia Housing Model - Technical Appendix"
-          - href: assignments/assignment_3(midterm)/Rutherford_Angel_Presentation.qmd
-            text: "Midterm: Philadelphia Housing Price Prediction - Presentation"
-          - href: assignments/assignment_4/Rutherford_Angel_Assignment4.qmd
-            text: "Assignment 4: Spatial Predictive Analysis"
-          - href: assignments/assignment_5/Rutherford_Angel_Assignment5.qmd
-            text: "Assignment 5: Space-Time Prediction of Bike Share Demand: Philadelphia Indego"
+      right:
+      - icon: linkedin
+        href: https://www.linkedin.com/in/angel-rutherford/
+        aria-label: LinkedIn
+      - icon: github
+        href: https://github.com/aruth3
+        aria-label: GitHub
+      - icon: envelope
+        href: mailto:aruth3@design.upenn.edu
+        aria-label: Email
             
 
 format:
   html:
-    theme: cosmo
-    toc: true
+    theme: lux
+    toc: false
     code-fold: true
 
 execute:

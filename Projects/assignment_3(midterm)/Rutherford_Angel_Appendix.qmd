@@ -1,0 +1,820 @@
+---
+title: "Philadelphia Housing Model - Technical Appendix"
+author: 
+  - name: Angel Rutherford
+  - name: Ixchel Ramirez
+  - name: Qianmu Zheng
+  - name: Xiao Yu
+  - name: Yanyang Chen
+affiliation:
+  - name: University of Pennsylvania
+    department: Urban Spatial Analytics (MUSA)
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc_float: true
+    toc-expand: true
+    smooth-scroll: true
+    embed-resources: true
+    title-block-style: default
+execute:
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# Phase 1: Data Preparation 
+
+In this analysis, we attempt to measure what factors we can use to predict the sale prices of residential properties in Philadelphia. In order to prepare the dataset for modeling residential property sales, we applied a series of targeted cleaning and structural, socioeconomic, and spatial variable selection.
+
+We filtered our property sales data to only show sales for the past two years to ensure up-to-date insights. We restricted the dataset to `"SINGLE FAMILY"` and `"MULTI FAMILY"` homes, excluding apartments and non-residential sales to ensure comparability, relevancy, and accuracy in our prediction models. Various apartments contained within the same building were found to be listed with a comprehensive sales price of the entire building which posed the threat of distorting our analysis. Observation values that were regarded as data entry errors or outliers were also removed. Properties with zero bathrooms, bedrooms, or livable area were removed as well as properties with a sales price below \$10,000 and above \$1,000,000. 
+
+We retained select structural attributes from our original dataset that we considered theoretically relevant to predicting sale price: number of bedrooms, number of bathrooms, total livable area, year the home was built, exterior condition, availability of garage spaces, and finally, the dependent variable, sale price.
+
+
+**Code for Property Sales Data Cleaning and Variable Selection**
+```{r load and clean sales data, echo=TRUE, results='hide'}
+
+#load necessary libraries
+library(modelsummary)
+library(stargazer)
+library(sf)
+library(tigris)
+library(tidycensus)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(knitr)
+library(scales)
+
+#load census key for later use
+census_api_key("42bf8a20a3df1def380f330cf7edad0dd5842ce6")
+
+#save data in url 
+url <- "https://phl.carto.com/api/v2/sql?filename=opa_properties_public&format=geojson&skipfields=cartodb_id&q=SELECT+*+FROM+opa_properties_public"
+
+#suppress warnings for clarity and read data as spatial object
+suppressWarnings({
+ property_data <- st_read(url)
+})
+
+#clean data
+parcel_data <- property_data%>%
+  select(location, #load columns that could potentially be used as predictors 
+         category_code_description, #maybe garage_spaces and central air too?
+         number_of_bedrooms,
+         number_of_bathrooms, 
+         total_livable_area,
+         year_built,
+         exterior_condition,
+         garage_spaces,
+         sale_price,
+         sale_date)%>%
+  filter(category_code_description %in% 
+  c("SINGLE FAMILY","MULTI FAMILY"))%>% #no apartments, sales price of building
+  drop_na(number_of_bedrooms, #remove anomalies like houses with no rooms
+          number_of_bathrooms,
+          total_livable_area,
+          sale_price,
+          year_built) %>%
+  filter(number_of_bedrooms>0, 
+         number_of_bathrooms>0,
+         total_livable_area>0, 
+         sale_price>=10000, sale_price <=1000000)%>% #remove very low/high prices
+  mutate(sale_year = str_remove(sale_date, "-.*"))%>%   
+  filter(sale_year %in% c("2023","2024"))%>% #limit to only 2023 and 2024
+  mutate(year_built = as.numeric(year_built))%>%
+  mutate(Age = 2025 - year_built)%>% filter(Age <2000)%>% #create a age column
+  filter(exterior_condition != 0) %>% #create exterior condition binary  
+  mutate(
+    exterior_good = case_when(
+      exterior_condition >= 1 & exterior_condition <= 5 ~ 1,
+      exterior_condition >= 6 & exterior_condition <= 9 ~ 0,
+      TRUE ~ NA_real_ 
+    )
+  )
+
+```
+
+```{r property data summary table, echo=FALSE}
+
+#create dataframes to put in kable
+dim_raw <- data.frame(
+  Dataset = "Raw Property Data",
+  Rows = nrow(property_data),
+  Columns = ncol(property_data)
+)
+
+dim_clean <- data.frame(
+  Dataset = "Cleaned Parcel Data",
+  Rows = nrow(parcel_data),
+  Columns = ncol(parcel_data)
+)
+
+dim_summary1 <- bind_rows(dim_raw, dim_clean)
+kable(dim_summary1, caption = "Table 1. Property Dataset Dimensions Before and After Cleaning and Selecting Varaiables")
+
+```
+
+
+We derived our socioeconomic predictors from tract-level census data provided by the 2022 American Community Survey: median income, number with at least a bachelor's degree, total number of those with at least a bachelor's degree, number of those living in poverty, and total of those living in poverty. Census tracts with missing median income or zero reported as the median income were removed as it often indicated missing or zero values for other key predictors. We also mutated our census dataset to include two more columns, the percentage of people with bachelors and percentage of people in poverty, in order to standardize the observations across varying tract population sizes. Spatial data of the census tracts was also loaded in order to join our census variables to our parcel-level property data.
+
+
+**Code for Census Data Cleaning and Variable Selection**
+```{r load and clean census data, echo=TRUE, results='hide'}
+
+#load data about poverty(counts and total), bachelors(counts and total), and income 
+census_data <- get_acs(
+  geography = "tract",
+  state = "PA",
+  county = "Philadelphia",
+  variables = c(
+    median_income = "B19013_001",
+    num_with_bach = "B15003_022",
+    bachelors_total ="B15003_001",
+    num_in_poverty = "B17001_002",
+    poverty_total ="B17001_001"
+  ),
+  year = 2022,
+  output = "wide"
+)
+
+#create percentage columns for bachelors and poverty 
+philly_census <- census_data%>%
+  mutate(
+    percentage_bach = num_with_bachE / bachelors_totalE,
+    percentage_pov =  num_in_povertyE / poverty_totalE
+  )
+
+#remove data errors or incomplete fields 
+philly_census <- philly_census%>%
+  drop_na(median_incomeE)%>%
+  filter(median_incomeE>0)
+
+
+#spatial census data 
+philadelphia_tracts <- tracts(
+  state = "PA",
+  county = "Philadelphia",
+  cb = TRUE,
+  year = 2022
+)
+
+#join census data and tract geometry to PARCEL data
+parcel_data <- parcel_data %>%
+  st_transform(st_crs(philadelphia_tracts))%>%
+  st_join(philadelphia_tracts, join = st_within)%>%
+  left_join(philly_census, by = "GEOID")
+
+```
+
+```{r census summary table, echo=FALSE}
+
+#create dataframes to put in kable
+dim_census <- data.frame(
+  Dataset = "Census Data",
+  Rows = nrow(census_data),
+  Columns = ncol(census_data)
+)
+
+dim_cen_clean <- data.frame(
+  Dataset = "Cleaned Census Data",
+  Rows = nrow(philly_census),
+  Columns = ncol(philly_census)
+)
+
+dim_summary2 <- bind_rows(dim_census, dim_cen_clean)
+kable(dim_summary2, caption = "Table 2. Census Dataset Dimensions Before and After Cleaning and Selecting Varaiables")
+
+```
+
+
+To further contextualize house prices, we loaded spatial datasets including the locations of colleges and universities, 2024 crime incidents, and Philadelphia neighborhood boundaries. These datasets were loaded with the intention of engineering spatial features such as proximity measurements and neighborhood stratification in order to account for spatial patterns and potential interactive spatial effects within our predictive model. Only the 2024 crime incidents needed to be cleaned due to the missing geometries that would prevent spatial analysis.
+
+**Code for Spatial Data Cleaning and Variable Selection**
+```{r load and clean spatial data, echo=TRUE, results='hide'}
+
+#load university data
+university_data <- st_read("./data/Universities_Colleges.geojson")
+
+#load 2024 crime incident data
+org_crime_data <-st_read("./data/incidents_part1_part2.shp")
+
+#removed crime incidents with no geometry 
+crime_data <- org_crime_data %>%
+  filter(!st_is_empty(geometry))
+
+#load neighborhood data 
+neighborhoods <- st_read("./data/philadelphia-neighborhoods.shp")
+
+```
+
+```{r spatial data summary table, echo=FALSE}
+
+#create dataframes to put in kable
+dim_crime <- data.frame(
+  Dataset = "Crime Data",
+  Rows = nrow(org_crime_data),
+  Columns = ncol(org_crime_data)
+)
+
+dim_cri_clean <- data.frame(
+  Dataset = "Cleaned Crime Data",
+  Rows = nrow(crime_data),
+  Columns = ncol(crime_data)
+)
+
+dim_summary3 <- bind_rows(dim_crime, dim_cri_clean)
+
+kable(dim_summary3, caption = "Table 3. Spatial Datasets Dimensions Before and After Cleaning")
+
+```
+
+
+# Phase 2: Exploratory Data Analysis
+
+We created a histogram to visualize the distribution of home sale prices in Philadelphia. The resulting graph revealed a positively skewed distribution, indicating that most properties were sold at lower price points, primarily between \$150,000 and \$350,000, while a small number of high-value homes sold for up to \$1,000,000. As it pertains to our predictive model, this skewness suggests that a log-transformation of sale prices may be necessary to normalize the distribution of values and potentially improve model performance. It also indicates the need for diagnostic checks to determine the impact of outliers in order to ensure that the few high-priced homes do not distort our model estimates.
+
+```{r histogram of prices, echo=FALSE}
+
+#distribution of sales prices 
+ggplot(parcel_data, aes(x = sale_price)) +
+  geom_histogram(binwidth = 50000, fill = "lightblue", color = "darkblue") +
+  scale_x_continuous(labels = label_dollar()) +
+  labs(
+    title = " Figure 1. Distribution of Home Sale Prices",
+    x = "Sale Price",
+    y = "Frequency"
+  ) +
+  theme_minimal()+
+   theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot"
+  )
+
+```
+We also explored the geographic distribution of sales prices across the neighborhoods in Philadelphia. We calculated the median sales price by each Philadelphia neighborhood. The map in Figure 2 shows distinct spatial patterns with higher prices above \$400,000, represented by lighter colors, being concentrated in neighborhoods such as Center City, University City, and parts of Northwest Philadelphia. 
+
+```{r chloropleth geographic distribution, echo=FALSE}
+
+#change projection to prep for join
+parcel_proj <- st_transform(parcel_data, 3365)
+neighborhood_proj <-st_transform(neighborhoods, 3365)
+
+#associate houses with neighborhoods by joining them based on neighborhoods they fall into 
+parcel_with_neighborhood <-  st_join(parcel_proj, neighborhood_proj, join = st_within)%>%
+  st_drop_geometry()%>%
+  group_by(NAME) %>%
+  summarize(median_price = median(sale_price, na.rm = TRUE)) #calculate median sales price
+
+neighborhoods_and_prices <- left_join(parcel_with_neighborhood, neighborhoods, by="NAME")
+neighborhoods_and_prices <- st_as_sf(neighborhoods_and_prices)
+
+#plot chloropleth
+
+ ggplot(neighborhoods_and_prices) +
+  geom_sf(aes(fill = median_price), color = "white", size = 0.1) +
+  scale_fill_viridis_c(option = "plasma", 
+                       name = "Median Sale Price", 
+                       na.value = "grey80",
+                        labels = scales::label_dollar()) +
+  theme_void() +
+  labs(
+    title = "Figure 2. Median Sale Price by Philadelphia Neighborhood"
+  )
+
+```
+One interesting relationship we found when exploring the structural predictors of sales price was the non-linear association between home age and sale price. Because we have already determined that sale prices are not normally distributed, we plotted our predictors by the log-transformed sale price to limit distortion when attempting to assess the relationship between predictors and sales price. Even with this transformation, Figure 3 shows that sale prices tend to decline for middle-aged homes but rebound for older, more historic properties. The figure includes both a linear and quadratic line to further emphasize that a linear relationship is not sufficient in capturing the impact of age on house prices. 
+
+```{r structural scatterplot, echo=FALSE}
+
+#create logged sales price for plotting 
+parcel_data <- parcel_data%>%
+  mutate(log_sale_price = log(sale_price))
+
+ggplot(parcel_data, aes(x = Age, y = log_sale_price)) +
+  geom_point(alpha = 0.3, color="steelblue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  labs(
+    title = "Figure 3. House Age vs. Sale Price (logged): Linear (red) vs. Flexible Curve (blue)",
+    x = "Age (years)",
+    y = "Sale Price (%)",
+    caption = "Red = linear assumption, Blue = data-driven curve"
+  ) +
+  theme_minimal()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot"
+  )
+  
+
+
+```
+
+One spatial factor that we found theoretically relevant to predicting sales price was proximity to violent crimes. We hypothesized that a home's proximity to violent crimes such as homicides, aggravated assaults with and without firearms, and armed robberies may lead to a depreciation in house value. To measure this, loaded the location of crime incidents 2024 and calculated the density of crime within 600 feet of each home. In Figure 4 we explored this relationship between violent crimes and found a general negative trend between proximity to crime and sale price. 
+
+```{r spatial scatterplot, echo=FALSE}
+
+#set crs for distance calculations
+crime_proj <- st_transform(crime_data, 3365)
+parcel_proj <- st_transform(parcel_data, 3365)
+
+#proximity (within 600 feet) to violent crime
+
+parcel_buffers<- st_buffer(parcel_proj, dist=600)
+
+violent_crimes <- c("Homicide - Criminal","Aggravated Assault No Firearm","Robbery Firearm","Aggravated Assault Firearm")
+
+violent_proj <- crime_proj %>%
+  filter(text_gener %in% violent_crimes)
+    
+violent_crime_counts <- st_intersects(parcel_buffers, violent_proj)
+violent_crime_counts <- lengths(violent_crime_counts)
+parcel_data$violent_crime_600ft <- violent_crime_counts
+
+ggplot(parcel_data, aes(x = violent_crime_counts, y = log_sale_price)) +
+  geom_point(alpha = 0.3, color="steelblue") +
+   geom_smooth(method = "lm", color = "red", se = FALSE) +
+  labs(
+    title = "Figure 4. Counts of Violent Crimes within 600 feet vs. Sale Price\n (logged): Linear Trend (red)",
+    x = "Number of Violent Crimes",
+    y = "Sale Price (%)",
+     caption = "Red = linear assumption"
+  ) +
+  theme_minimal()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot" 
+  )
+  
+```
+We also created a violin plot to illustrates the distribution and density of sale prices across within the top ten neighborhoods with the highest median sale prices. The violin plot in Figure 5 reveals heterogeneity in sale prices within the wealthiest neighborhoods, indicating juxtaposition of high and low sales prices within close proximity of one another. While some neighborhoods are more concentrated at similar sales prices, neighborhoods like Bella Vista and Northern Liberties had long tails extending towards the lowest sale prices. 
+
+```{r create visual (figure 5), echo=FALSE}
+
+top_ten<- neighborhoods_and_prices%>%
+  drop_na()%>%
+  arrange(desc(median_price))%>%
+  slice_head(n=10)%>%
+  pull(NAME)
+
+houses_in_wealth <- parcel_proj%>%
+  st_join(neighborhood_proj, by=st_within)%>%
+  filter(NAME %in% top_ten)
+
+ggplot(houses_in_wealth, aes(x = NAME, y = log_sale_price)) +
+  geom_violin(fill = "lightblue", color = "darkblue", alpha = 0.6) +
+  labs(
+    title = "Figure 5. Distribution of Sale Prices (logged) in Wealthly Philadelphia Neighborhoods",
+    x = "Wealthy Neighborhood",
+    y = "Sale Price (%)"
+  ) +
+  theme_minimal() +
+    theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+# Phase 3: Feature Engineering 
+
+In order to account for the spatial patterns highlight during the exploratory phase, we created a number of spatial features to incorporate into our predictive model.
+
+**Code for Feature Engineering: Crime Buffer**  
+```{r buffer crime feature engineering, echo=TRUE, results='hide'}
+
+#set crs for distance calculations
+crime_proj <- st_transform(crime_data, 3365)
+parcel_proj <- st_transform(parcel_data, 3365)
+university_proj <- st_transform(university_data, 3365)
+
+#proximity (within 600 feet) to violent crime
+
+parcel_buffers<- st_buffer(parcel_proj, dist=600)
+
+violent_crimes <- c("Homicide - Criminal","Aggravated Assault No Firearm","Robbery Firearm","Aggravated Assault Firearm")
+
+violent_proj <- crime_proj %>%
+  filter(text_gener %in% violent_crimes)
+    
+violent_crime_counts <- st_intersects(parcel_buffers, violent_proj)
+violent_crime_counts <- lengths(violent_crime_counts)
+parcel_data$violent_crime_600ft <- violent_crime_counts
+
+```
+
+**Code for Feature Engineering: K-Nearest Neighbor for Colleges**
+```{r knn college feature engineering, echo=TRUE, results='hide'}
+
+#knn to university 
+
+university_proj <- st_transform(university_data, 3365) #projection changed in order to calculate distance 
+
+
+dist_matrix <- st_distance(parcel_proj, university_proj)
+
+
+get_knn_distance <- function(dist_matrix, k) {
+  apply(dist_matrix, 1, function(distances) {
+    mean(as.numeric(sort(distances)[1:k]))
+  })
+}
+
+parcel_data$college_nn1 <- get_knn_distance(dist_matrix, k = 1)
+parcel_data$college_nn3 <- get_knn_distance(dist_matrix, k = 3)
+parcel_data$college_nn5 <- get_knn_distance(dist_matrix, k = 5)
+
+#determine which nearest neighbor is correlated the most with sales price 
+
+parcel_data %>% 
+  st_drop_geometry() %>%
+  select(sale_price, college_nn1, college_nn3, college_nn5) %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  select(sale_price)
+
+```
+
+**Code for Feature Engineering: Neighborhood Interaction Effects**
+```{r neighborhood interaction effects, echo=TRUE, results='hide'}
+
+# wealthy neighborhood interaction effects
+parcel_proj <- st_transform(parcel_data, 3365)
+neighborhood_proj <-st_transform(neighborhoods, 3365)
+
+
+#median sales price 
+wealthy_neighborhoods <- parcel_with_neighborhood%>%
+  filter(median_price >= 275500)%>%
+  pull(NAME)
+
+#finding the parcels that fall within neighborhood boundaries 
+parcel_data <- parcel_proj %>%
+  st_join(neighborhood_proj, join = st_within) %>%
+  mutate(
+    wealthy_neighborhood = ifelse(NAME %in% wealthy_neighborhoods, "Wealthy", "Not Wealthy"), #creating a flag to delineate them into two categories 
+    wealthy_neighborhood = as.factor(wealthy_neighborhood)
+  )
+
+```
+
+
+```{r summary table of spatial features, echo=FALSE}
+#Summary table of engineered features
+
+# Create a data frame summarizing each feature
+feature_summary <- data.frame(
+  Feature_Name = c(
+    "violent_crime_600ft",
+    "college_nn1",
+    "college_nn3",
+    "college_nn5",
+    "median_incomeE",
+    "percentage_bach",
+    "percentage_pov",
+    "wealthy_neighborhood",
+    "log_sale_price",
+    "log_livable_area",
+    "Age",
+    "exterior_good"
+  ),
+  Feature_Type = c(
+    "Buffer-based (spatial)",
+    "kNN (spatial distance)",
+    "kNN (spatial distance)",
+    "kNN (spatial distance)",
+    "Census (socioeconomic)",
+    "Census (education)",
+    "Census (poverty)",
+    "Interaction term (categorical)",
+    "Transformation (continuous)",
+    "Transformation (continuous)",
+    "Structural (numeric)",
+    "Condition (binary)"
+  ),
+  Description = c(
+    "Count of violent crimes within 600 ft of parcel",
+    "Average distance to nearest college/university (k=1)",
+    "Average distance to 3 nearest colleges/universities",
+    "Average distance to 5 nearest colleges/universities",
+    "Median household income of census tract",
+    "Percent of tract population with bachelor's degree",
+    "Percent of tract population below poverty line",
+    "Indicates parcels located in wealthy neighborhoods",
+    "Natural log of sale price",
+    "Natural log of total livable area (sq ft)",
+    "Years since building construction",
+    "1 = good/average exterior, 0 = poor"
+  ),
+  Justification = c(
+    "Captures neighborhood safety and crime exposure",
+    "Measures proximity to educational amenities",
+    "Captures local educational accessibility",
+    "Captures broader proximity to higher education hubs",
+    "Represents economic conditions of local area",
+    "Education level could be connected to property values",
+    "Reflects socioeconomic disadvantage",
+    "Identifies context of neighborhood wealth levels",
+    "Stabilizes variance for regression modeling",
+    "Normalizes skewed size variable for modeling",
+    "Accounts for devaluation of property value with time",
+    "Changed categorical condition to numeric to understand exterior desirability"
+  )
+)
+
+# Print table nicely
+library(knitr)
+kable(feature_summary, caption = "Table 4. Summary of Engineered Features", align = "l")
+
+
+```
+
+The features included were engineered to capture social, economic, and environmental factors influencing housing prices. Buffer-based and nearest-neighbor measures quantify local accessibility and safety. Census data enrich parcels with socio-economic context. Interaction terms account for neighborhood-level wealth effects which helps contextualize external features of a home, for instance homes in a wealthy neighborhood are more likely to have a higher property value than those not in a wealthy neighborhood. Applying a binary indicator improves model interpretability and performance.
+
+
+# Phase 4: Model Building
+
+When building our model's be progressively built out models to expand upon the last with out first model being the baseline of all our models and using only structural variables, the second model adding socioeconomic census variables, our third model introducing our spatial features, and our fourth model added spatial interactions and fixed effects. 
+
+
+**Code for Model Building**
+```{r model building, echo=TRUE, results='hide'}
+
+#create log livable area for modeling
+
+parcel_data <- parcel_data%>%
+  mutate(log_livable_area = log(total_livable_area))
+
+#structural features only 
+model1 <- lm(log_sale_price ~ number_of_bathrooms + number_of_bedrooms + log_livable_area + garage_spaces + Age + I(Age^2) + exterior_good, data = parcel_data)
+
+
+#structural + census 
+model2 <- lm(log_sale_price ~ number_of_bathrooms + number_of_bedrooms + log_livable_area  + garage_spaces + Age + I(Age^2) + exterior_good + median_incomeE + percentage_bach + percentage_pov, data = parcel_data)
+
+#structural + census + spatial 
+model3 <- lm(log_sale_price ~ number_of_bathrooms+ garage_spaces + Age + I(Age^2) + exterior_good + log_livable_area + median_incomeE +percentage_bach + percentage_pov + college_nn1 + violent_crime_600ft, data = parcel_data)
+
+
+#structural + census + spatial + interactions 
+model4 <- lm(log_sale_price ~ number_of_bathrooms+ garage_spaces + Age + I(Age^2) + exterior_good + log_livable_area * wealthy_neighborhood + median_incomeE +percentage_bach + percentage_pov + college_nn1 + violent_crime_600ft, data = parcel_data)
+
+```
+
+Our summary table of coefficients for predictors by model indicate statistical numerically as well as with stars to account for low values omitted through the rounding of coefficients. 
+
+**Full Model Summary of Models**
+```{r full stargazer/ model summary (table 5), echo=FALSE}
+
+modelsummary(
+  list("Model 1" = model1, "Model 2" = model2, "Model 3" = model3, "Model 4" = model4),
+  statistic = "conf.int",         # shows confidence intervals
+  stars = TRUE,                   # adds significance stars
+  output = "markdown",            # clean for R Markdown or console
+  gof_omit = "AIC|BIC|Log.Lik." # optional: hide less relevant stats
+  )
+
+```
+Across all models, the coefficient for the structural predictors like the number of bathrooms, garage spaces, livable area, and exterior conditions remains consistently positive and statistically significant, with livable area and exterior conditions being the most influential of the predictors. The coefficients for age and it's quadratic adjustment showed that older homes sold for less while the coefficients for the number of bedrooms showed that it became less statistically significant as non-structural predictors were introduced. 
+
+As census variables are introduced in Model 2, median income, educational attainment, and poverty rate all show expected relationships: higher income and education levels are associated with higher sale prices, while higher poverty rates are negatively associated.Our spatial features introduced in Model 3, distance from the nearest college and density of crime were also identified as statistically significant. In Model 4, the coefficient for wealthy neighborhood is large and positive. There is, however, a slight negative interaction between log(livable area) and wealthy neighborhoods. This suggests that while larger homes still tend to sell for more, the appreciation of value of each additional square foot is less pronounced in already expensive areas.
+
+Overall, the progression from Model 1 to Model 4 shows increasing explanatory power (R² rising from 0.35 to 0.60), and decreasing RMSE, indicating improved model fit as more structural and contextual variables are added.
+
+
+# Phase 5: Model Validation
+
+In order to further assess the predictive power of our models, we performed 10-fold cross validation for each model in order to determine how well the model predicts for unseen data.
+
+**Code for 10-fold Cross-Validation**
+```{r 10 fold cross-validation results and scatterplots, echo=TRUE,results='hide'}
+
+parcel_data <- na.omit(parcel_data)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 10  # intiate 10-fold CV
+)
+
+model_cv1 <-  train(log_sale_price ~ 
+                      number_of_bathrooms +
+                      number_of_bedrooms +
+                      log_livable_area +
+                      garage_spaces + 
+                      Age + I(Age^2) + 
+                      exterior_good,
+                     data = parcel_data,
+                       method = "lm",
+                       trControl = ctrl)
+
+  
+model_cv2 <- train(log_sale_price ~ 
+                     number_of_bathrooms +
+                     number_of_bedrooms + 
+                     log_livable_area  +
+                     garage_spaces +
+                     Age + I(Age^2) + 
+                     exterior_good + 
+                     median_incomeE + 
+                     percentage_bach + 
+                     percentage_pov,
+                     data = parcel_data,
+                      method = "lm",
+                      trControl = ctrl
+)
+
+
+model_cv3 <- train(log_sale_price ~ 
+                     number_of_bathrooms +
+                     garage_spaces +
+                     Age + I(Age^2) + 
+                     exterior_good + 
+                     log_livable_area +
+                     median_incomeE + 
+                     percentage_bach +
+                     percentage_pov + 
+                     college_nn1 + 
+                     violent_crime_600ft,
+                     data = parcel_data,
+                    method = "lm",
+                    trControl = ctrl
+)
+
+
+
+model_cv4 <- train(log_sale_price ~ 
+                     number_of_bathrooms+
+                     garage_spaces + 
+                     Age + I(Age^2) +
+                     exterior_good + 
+                     log_livable_area * wealthy_neighborhood + 
+                     median_incomeE +
+                     percentage_bach + 
+                     percentage_pov +
+                     college_nn1 + 
+                     violent_crime_600ft,
+                     data = parcel_data,
+                      method = "lm",
+                    trControl = ctrl
+)
+
+```
+
+
+Based on each model's measurement average squared prediction error (RMSE),  average absolute difference between predicted and actual values (MAE), and  reported proportion of explained variance (R^2), we determined that Model 4's inclusion of structural, socioeconomic, spatial, and interactive effects all contributed to smaller errors between predicted values and actual values and offered greater explanatory power. 
+
+
+```{r cross-validation summary table, echo=FALSE}
+
+results_table <- rbind(
+  cbind(Model = "Model 1", model_cv1$results),
+  cbind(Model = "Model 2", model_cv2$results),
+  cbind(Model = "Model 3", model_cv3$results),
+  cbind(Model = "Model 4", model_cv4$results)
+)
+
+results_table %>%
+  select(Model, RMSE, Rsquared, MAE) %>%
+  mutate(across(where(is.numeric), round, 4)) %>%
+  kable(caption = "Table 6. Cross-Validated Performance Metrics for Four Models")
+
+```
+
+
+
+```{r predicted vs actual plot, echo=FALSE}
+
+model_data_used <- model.frame(model4)
+
+model_data_used$Predicted <- model4$fitted.values
+
+ggplot(model_data_used, aes(x = log_sale_price, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Figure 6. Predicted vs Actual (Model 4)",
+    x = "Actual log(sale_price)",
+    y = "Predicted log(sale_price)"
+  ) +
+  theme_minimal()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot"
+  )
+
+```
+
+The graph of the actual logged sale prices by the predicted logged sale prices compliments our model performance metrics found in Table 6 as points cluster closely around the reference line suggesting stable consistency in errors and moderate ability to predict sale prices.
+
+
+# Phase 6: Model Diagnostics
+
+When using linear regression to model relationships, we assume a number of conditions are met to support the validity of using a linear model. Here we test various linear modeling assumptions to determine the appropriateness of our model.
+
+One linear model assumption is the assumption that the relationship is actually linear. 
+If the linearity assumption is met, residuals should be randomly scattered around the zero line with no discernible pattern.
+
+In Figure 7, we plotted the residuals or prediction errors by the model's fitted values. The red dashed line at zero marks where residuals would fall if predictions were perfect.
+In this plot, the residuals appear to fan out as fitted values increase, suggesting a possible violation of the linearity. This pattern may indicate that the model under- or over-predicts at different price levels.
+
+```{r residual plot, echo=FALSE}
+
+res_df <- data.frame(
+  Fitted = fitted(model4),
+  Residuals = residuals(model4)
+)
+
+# Plot using ggplot
+ggplot(res_df, aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.6, color="steelblue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Figure 7. Residual Plot", x = "Fitted Values", y = "Residuals") +
+  theme_minimal()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot"
+  )
+  
+```
+
+Another assumption we test is the normal distribution of residuals or errors.  In Figure 8, we test the assumption of normally distributed residuals using a Q-Q plot. If normality of residual's is met, the sample quantile points should fall roughly along the blue reference line representing theoretical quantiles of normal distribution.
+
+In this plot, the residuals deviate from the line, particularly in the tails at low and high values, indicating non-normality. 
+
+```{r q-q plot, echo=FALSE}
+
+ggplot(res_df, aes(sample = Residuals)) +
+  stat_qq() +
+  stat_qq_line(color = "steelblue") +
+  labs(title = "Figure 8. Q-Q Plot of Residuals",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot"
+  )
+
+```
+
+One last regression assumption check we performed was determining whether there were influential outliers present. Figure 9 displays Cook’s Distance values for each observation, with colors indicating whether the point is flagged as influential, blue being none influential observations and red being the influential obeservations. A substantial large number of our observations were marked as influential, suggesting that many data points have both high leverage and large residuals.  
+
+```{r cooks distance, echo=FALSE}
+
+model4_data <- model.frame(model4)
+
+# Add diagnostics to model_data
+model4_data <- model4_data %>%
+  mutate(
+    cooks_d = cooks.distance(model4),
+    leverage = hatvalues(model4),
+    is_influential = cooks_d > 4 / nrow(model4_data)
+  )
+
+# Plot Cook's Distance
+ggplot(model4_data, aes(x = 1:nrow(model4_data), y = cooks_d)) +
+  geom_point(aes(color = is_influential), size = 2) +
+  geom_hline(yintercept = 4 / nrow(model4_data), 
+             linetype = "dashed", color = "red") +
+  scale_color_manual(values = c("steelblue", "red")) +
+  labs(title = "Figure 9. Cook's Distance",
+       x = "Observation", y = "Cook's D") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    plot.title.position = "plot")
+  
+```
+
+# Phase 7: Conclusions & Recommendations
+
+The final model demonstrates strong performance, achieving an adjusted R² of 0.591 and explaining nearly 59% of the variation in housing prices across Philadelphia. This marks a substantial improvement over the baseline structural model (Model 1, R² = 0.35), highlighting the value of incorporating  spatial characteristics alongside structural and socioeconomic factors. 
+
+Among all predictors, total livable area emerges as the most influential driver of price, followed by the number of bathrooms and garage spaces. Exterior condition, median income, and educational attainment also show positive associations. Conversely, poverty rate and local crime density are negatively associated with price. 
+
+The interaction between living area and wealthy neighborhoods reveal that additional square footage may not have as much of an impact on price in high-value areas. Spatial dependencies are also evident in the model’s predictive accuracy as prediction errors show spatial patterns. The model performs best in mid-range price neighborhoods but struggles in areas like Nicetown, Fairhill, and Upper Kensington, where residual errors are higher. These disparities raise important equity concerns in the context of policy as these areas that are predisposed to under-prediction in modeling are also historical disadvantaged neighborhoods.
+

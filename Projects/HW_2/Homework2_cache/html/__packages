@@ -1,0 +1,17 @@
+pacman
+ggplot2
+dplyr
+sf
+spData
+spdep
+sp
+spgwr
+tmap
+Matrix
+spatialreg
+whitestrap
+zoo
+lmtest
+tseries
+patchwork
+stargazer
